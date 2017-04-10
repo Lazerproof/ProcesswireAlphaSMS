@@ -1,0 +1,251 @@
+<?php namespace ProcessWire;
+
+use SimpleXMLElement;
+
+class ProcesswireAlphaSMS extends WireData implements Module  {
+
+	/**
+	 * Module information
+	 */
+	public static function getModuleInfo() {
+		return array(
+			'title' => 'ProcesswireAlphaSMS',
+			'version' => 1,
+			'author' => 'Lazerproof',
+			'summary' => ' AlphaSMS API integration for Processwire CMF',
+			// 'href' => 'http://www.domain.com/info/about/this/module/',
+			'autoload' => true,
+			'requires' => array(
+				'PHP>=5.6',
+				'ProcessWire>=2.8'
+			)
+		);
+	}
+
+	/**
+	 * Alpha SMS API URL
+	 * @var string
+	 */
+	private $service = 'http://alphasms.com.ua/api/xml.php';
+
+	/**
+	 *
+	 * @var integer
+	 */
+	private $responseStatusCode;
+
+	/**
+ 	 * Nane of current operation
+	 * @var string
+	 */
+	private $operation;
+
+
+	/**
+	 * @var object
+	 */
+	private $responseObject;
+
+	/**
+	 * Type of sending mesage
+	 * @var integer
+	 */
+	private $typeMessage = self::TYPE_MESSAGE_SMS;
+
+	const TYPE_MESSAGE_SMS = 0;
+	const TYPE_MESSAGE_FLASH = 1;
+	const TYPE_MESSAGE_PUSH = 2;
+	const TYPE_MESSAGE_VOICE = 3;
+
+	public function init() {
+		$this->wire('sms', $this);
+	}
+
+	public function send($data) {
+ 		if (isset($data['sender'])) {
+ 			$this->sender = wire("sanitizer")->text($data['sender'], array(
+	   			"maxlength" => 11,
+	   	 	));
+ 		}
+
+ 		if (!$this->sender) {
+			wire("log")->save("sms", "You have to set sender name in module settings or in method call");
+ 			return false;
+ 		}
+
+ 		if (!isset($data['text']) || !$data['text']) {
+ 			wire("log")->save("sms", "SMS have not been sent, bacause it was blank");
+			return false;
+ 		}
+
+ 		if (!isset($data['recipient']) || !$data['recipient']) {
+			wire("log")->save("sms", "Invalid 'recipient'.");
+			return false;
+ 		} elseif (isset($data['recipient']) || !$data['recipient']) {
+ 			$data['recipient'] = wire("sanitizer")->int($data['recipient']);
+ 		}
+
+ 		if (!isset($data['id']) || !$data['recipient']) {
+ 			$data['id'] = $this->generateUniqueId();
+ 		}
+
+ 		if (!isset($data['type']) || !$data['type']) {
+ 			$this->typeMessage = self::TYPE_MESSAGE_SMS;
+ 		} else {
+ 			$this->typeMessage = $data['type'];
+ 		}
+
+ 		if (
+ 		($this->typeMessage == self::TYPE_MESSAGE_PUSH && !isset($data['url']))
+ 		|| ($this->typeMessage == self::TYPE_MESSAGE_PUSH && !$data['url'])
+ 		) {
+			wire("log")->save("sms", "Invalid 'url'.");
+			return false;
+ 		}
+
+ 		if (
+ 		(isset($data['date_beg']) && $data['date_beg'])
+ 		&& (isset($data['date_end']) && $data['date_end'])
+ 		) {
+ 			if ($data['date_beg'] >= $data['date_end']) {
+				wire("log")->save("sms", "The 'date_end' parameter must exceed 'date_beg'.");
+				return false;
+ 			}
+ 		}
+
+ 		$this->operation = 'message';
+ 		$xml = $this->getRequestString($data);
+ 		$this->run($xml);
+ 		return $this->responseObject;
+ 	}
+
+	/**
+     * Get balance for user's account
+     *
+     * @return object XML Object
+     */
+    public function getBalance() {
+        $this->operation = 'balance';
+        $xml = $this->getRequestString();
+        $this->run($xml);
+		wire("log")->save("balance", $this->responseObject->balance->amount[0]);
+        return $this->responseObject;
+    }
+    /**
+     * Generate UID
+     *
+     * @return integer
+     */
+    public function generateUniqueId() {
+        $time = microtime();
+        $int = substr($time, 11);
+        $flo = substr($time, 2, 5);
+		$value = $int . $flo;
+        return $value;
+    }
+
+    /**
+     *
+     * @param array $data
+     * @return string
+     */
+    private function getRequestString($data = false) {
+        $requestObject = $this->initRequestBody();
+        $operation = $requestObject->addChild($this->operation);
+        if ($this->operation == 'status') {
+            $msg = $operation->addChild('msg');
+            if (isset($data['id'])) $msg->addAttribute('id', $data['id']);
+            if (isset($data['sms_id'])) $msg->addAttribute('sms_id', $data['sms_id']);
+        }
+        if ($this->operation == 'delete') {
+            $msg = $operation->addChild('msg');
+            if (isset($data['id'])) $msg->addAttribute('id', $data['id']);
+            if (isset($data['sms_id'])) $msg->addAttribute('sms_id', $data['sms_id']);
+        }
+        if ($this->operation == 'message') {
+            $msg = $operation->addChild('msg', $data['text']);
+            $msg->addAttribute('recipient', $data['recipient']);
+            $msg->addAttribute('sender', $this->sender);
+            $msg->addAttribute('type', $this->typeMessage);
+            if (isset($data['id']) && $data['id']) $msg->addAttribute('id', $data['id']);
+            if (
+                isset($data['url']) && $data['url']
+                && $this->typeMessage == self::TYPE_MESSAGE_PUSH
+            ) {
+                $msg->addAttribute('url', $data['url']);
+            }
+            if (isset($data['date_beg']) && $data['date_beg']) {
+                $msg->addAttribute('date_beg', date(DATE_ISO8601, $data['date_beg']));
+            }
+            if (isset($data['date_end']) && $data['date_end']) {
+                $msg->addAttribute('date_end', date(DATE_ISO8601, $data['date_end']));
+            }
+        }
+        $requestString = $this->formatXML($requestObject);
+        return $requestString;
+    }
+    /**
+     *
+     * @return object
+     */
+    private function initRequestBody() {
+        $requestObject = new SimpleXMLElement('<package></package>');
+        if ($this->key) {
+            $requestObject->addAttribute('key', $this->key);
+        } else {
+            $requestObject->addAttribute('login', $this->login);
+            $requestObject->addAttribute('password', $this->password);
+        }
+        return $requestObject;
+    }
+
+    /**
+     *
+     */
+    private function formatXML($simpleXMLObject) {
+        $dom = dom_import_simplexml($simpleXMLObject)->ownerDocument;
+        $dom->formatOutput = true;
+        return $dom->saveXML();
+    }
+
+	/**
+     *
+     * @param string $xml XML-string of request
+     */
+    private function run($xml) {
+		$sXml = simplexml_load_string($xml);
+
+		$sms = array(
+			"text" => (string) $sXml->message[0]->msg[0]
+		);
+
+		$attributes = $sXml->message[0]->msg[0]->attributes();
+		foreach ($attributes as $key => $value) {
+			$sms[$key] = (string) $value;
+		}
+
+        $ch = curl_init();
+        curl_setopt($ch, CURLOPT_URL, $this->service);
+        curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+        curl_setopt($ch, CURLOPT_TIMEOUT, 20);
+        curl_setopt($ch, CURLOPT_POSTFIELDS, $xml);
+        curl_setopt($ch, CURLOPT_POST, 1);
+        $response = curl_exec($ch);
+        $this->responseStatusCode = curl_getinfo($ch, CURLINFO_HTTP_CODE);
+        if ($this->responseStatusCode === 200) {
+            libxml_use_internal_errors(true);
+            if (simplexml_load_string($response)) {
+                $this->responseObject = simplexml_load_string($response);
+				wire("log")->save("sms", "SMS has been sent: Text: " . $sms["text"] . " | Recipient: " . $sms["recipient"]. " | ID: " . $sms["id"]);
+            } else {
+                die('Bad response: <br>' . htmlspecialchars($response));
+            }
+        }
+        $errno = curl_errno($ch);
+        $error = curl_error($ch);
+        curl_close($ch);
+        if ($errno) {
+            die('cURL error #' . $errno . ' - ' . $error);
+        }
+    }
+}
